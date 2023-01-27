@@ -9,6 +9,7 @@ from ...io.com.gltf2_io_debug import print_console
 from io_scene_gltf2.blender.exp import gltf2_blender_gather_skins
 from io_scene_gltf2.io.com import gltf2_io_constants
 from io_scene_gltf2.blender.com import gltf2_blender_conversion
+from io_scene_gltf2.io.exp.gltf2_io_user_extensions import export_user_extensions
 
 
 def extract_primitives(blender_mesh, uuid_for_skined_data, blender_vertex_groups, modifiers, export_settings):
@@ -111,7 +112,7 @@ class PrimitiveCreator:
                     self.armature = None
 
         self.key_blocks = []
-        if self.export_settings[gltf2_blender_export_keys.APPLY] is False and self.blender_mesh.shape_keys and self.export_settings[gltf2_blender_export_keys.MORPH]:
+        if self.blender_mesh.shape_keys and self.export_settings[gltf2_blender_export_keys.MORPH]:
             self.key_blocks = [
                 key_block
                 for key_block in self.blender_mesh.shape_keys.key_blocks
@@ -135,8 +136,16 @@ class PrimitiveCreator:
                 self.export_settings['vtree'].nodes[armature_uuid].need_neutral_bone = True
 
     def define_attributes(self):
+
+
+        class KeepAttribute:
+            def __init__(self, attr_name):
+                self.attr_name = attr_name
+                self.keep = attr_name.startswith("_")
+
         # Manage attributes + COLOR_0
         for blender_attribute_index, blender_attribute in enumerate(self.blender_mesh.attributes):
+
             attr = {}
             attr['blender_attribute_index'] = blender_attribute_index
             attr['blender_name'] = blender_attribute.name
@@ -163,10 +172,21 @@ class PrimitiveCreator:
                 attr['get'] = self.get_function()
 
             else:
-                attr['gltf_attribute_name'] = '_' + blender_attribute.name.upper()
-                attr['get'] = self.get_function()
+                # Custom attributes
+                # Keep only attributes that starts with _
+                # As Blender create lots of attributes that are internal / not needed are as duplicated of standard glTF accessors (position, uv, material_index...)
                 if self.export_settings['gltf_attributes'] is False:
                     continue
+                # Check if there is an extension that want to keep this attribute, or change the exported name
+                keep_attribute = KeepAttribute(blender_attribute.name)
+
+                export_user_extensions('gather_attribute_keep', self.export_settings, keep_attribute)
+
+                if keep_attribute.keep is False:
+                    continue
+
+                attr['gltf_attribute_name'] = keep_attribute.attr_name.upper()
+                attr['get'] = self.get_function()
 
             self.blender_attributes.append(attr)
 
@@ -552,16 +572,24 @@ class PrimitiveCreator:
         self.blender_mesh.color_attributes[blender_color_idx].data.foreach_get('color', colors)
         if attr['blender_domain'] == "POINT":
             colors = colors.reshape(-1, 4)
-            colors = colors[self.dots['vertex_index']]
+            data_dots = colors[self.dots['vertex_index']]
+            if self.export_settings['gltf_loose_edges']:
+                data_dots_edges = colors[self.dots_edges['vertex_index']]
+            if self.export_settings['gltf_loose_points']:
+                data_dots_points = colors[self.dots_points['vertex_index']]
+
         elif attr['blender_domain'] == "CORNER":
             colors = colors.reshape(-1, 4)
-        # colors are already linear, no need to switch color space
-        self.dots[attr['gltf_attribute_name'] + '0'] = colors[:, 0]
-        self.dots[attr['gltf_attribute_name'] + '1'] = colors[:, 1]
-        self.dots[attr['gltf_attribute_name'] + '2'] = colors[:, 2]
-        self.dots[attr['gltf_attribute_name'] + '3'] = colors[:, 3]
-        del colors
+            data_dots = colors
 
+        del colors
+        # colors are already linear, no need to switch color space
+        for i in range(4):
+            self.dots[attr['gltf_attribute_name'] + str(i)] = data_dots[:, i]
+            if self.export_settings['gltf_loose_edges'] and attr['blender_domain'] == "POINT":
+                self.dots_edges[attr['gltf_attribute_name'] + str(i)] = data_dots_edges[:, i]
+            if self.export_settings['gltf_loose_points'] and attr['blender_domain'] == "POINT":
+                self.dots_points[attr['gltf_attribute_name'] + str(i)] = data_dots_points[:, i]
 
     def __get_layer_attribute(self, attr):
         if attr['blender_domain'] in ['CORNER']:
@@ -747,7 +775,7 @@ class PrimitiveCreator:
 
     def __get_bitangent_signs(self):
         self.signs = np.empty(len(self.blender_mesh.loops), dtype=np.float32)
-        self.blender_mesh.loops.foreach_get('bitangent_sign', signs)
+        self.blender_mesh.loops.foreach_get('bitangent_sign', self.signs)
 
         # Transform for skinning
         if self.armature and self.blender_object:
@@ -757,7 +785,7 @@ class PrimitiveCreator:
             tangent_transform = apply_matrix.to_quaternion().to_matrix()
             flipped = tangent_transform.determinant() < 0
             if flipped:
-                signs *= -1
+                self.signs *= -1
 
         # No change for Zup -> Yup
 

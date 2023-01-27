@@ -3,7 +3,7 @@
 bl_info = {
     "name": "Node Wrangler",
     "author": "Bartek Skorupa, Greg Zaal, Sebastian Koenig, Christian Brinkmann, Florian Meyer",
-    "version": (3, 42),
+    "version": (3, 43),
     "blender": (3, 4, 0),
     "location": "Node Editor Toolbar or Shift-W",
     "description": "Various tools to enhance and speed up node-based workflow",
@@ -27,6 +27,7 @@ from bpy.props import (
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
+from .util import match_files_to_socket_names, split_into_components
 from nodeitems_utils import node_categories_iter, NodeItemCustom
 from math import cos, sin, pi, hypot
 from os import path
@@ -264,9 +265,14 @@ def force_update(context):
     context.space_data.node_tree.update_tag()
 
 
-def dpifac():
+def dpi_fac():
     prefs = bpy.context.preferences.system
-    return prefs.dpi * prefs.pixel_size / 72
+    return prefs.dpi / 72
+
+
+def prefs_line_width():
+    prefs = bpy.context.preferences.system
+    return prefs.pixel_size
 
 
 def node_mid_pt(node, axis):
@@ -342,8 +348,8 @@ def node_at_pos(nodes, context, event):
     for node in nodes:
         skipnode = False
         if node.type != 'FRAME':  # no point trying to link to a frame node
-            dimx = node.dimensions.x/dpifac()
-            dimy = node.dimensions.y/dpifac()
+            dimx = node.dimensions.x / dpi_fac()
+            dimy = node.dimensions.y / dpi_fac()
             locx, locy = abs_node_location(node)
 
             if not skipnode:
@@ -362,8 +368,8 @@ def node_at_pos(nodes, context, event):
     for node in nodes:
         if node.type != 'FRAME' and skipnode == False:
             locx, locy = abs_node_location(node)
-            dimx = node.dimensions.x/dpifac()
-            dimy = node.dimensions.y/dpifac()
+            dimx = node.dimensions.x / dpi_fac()
+            dimy = node.dimensions.y / dpi_fac()
             if (locx <= x <= locx + dimx) and \
                (locy - dimy <= y <= locy):
                 nodes_under_mouse.append(node)
@@ -392,7 +398,7 @@ def store_mouse_cursor(context, event):
 def draw_line(x1, y1, x2, y2, size, colour=(1.0, 1.0, 1.0, 0.7)):
     shader = gpu.shader.from_builtin('POLYLINE_SMOOTH_COLOR')
     shader.uniform_float("viewportSize", gpu.state.viewport_get()[2:])
-    shader.uniform_float("lineWidth", size * dpifac())
+    shader.uniform_float("lineWidth", size * prefs_line_width())
 
     vertices = ((x1, y1), (x2, y2))
     vertex_colors = ((colour[0]+(1.0-colour[0])/4,
@@ -406,7 +412,7 @@ def draw_line(x1, y1, x2, y2, size, colour=(1.0, 1.0, 1.0, 0.7)):
 
 
 def draw_circle_2d_filled(mx, my, radius, colour=(1.0, 1.0, 1.0, 0.7)):
-    radius = radius * dpifac()
+    radius = radius * prefs_line_width()
     sides = 12
     vertices = [(radius * cos(i * 2 * pi / sides) + mx,
                  radius * sin(i * 2 * pi / sides) + my)
@@ -421,12 +427,12 @@ def draw_circle_2d_filled(mx, my, radius, colour=(1.0, 1.0, 1.0, 0.7)):
 def draw_rounded_node_border(node, radius=8, colour=(1.0, 1.0, 1.0, 0.7)):
     area_width = bpy.context.area.width
     sides = 16
-    radius = radius*dpifac()
+    radius *= prefs_line_width()
 
     nlocx, nlocy = abs_node_location(node)
 
-    nlocx = (nlocx+1)*dpifac()
-    nlocy = (nlocy+1)*dpifac()
+    nlocx = (nlocx+1) * dpi_fac()
+    nlocy = (nlocy+1) * dpi_fac()
     ndimx = node.dimensions.x
     ndimy = node.dimensions.y
 
@@ -674,7 +680,7 @@ def get_output_location(tree):
 class NWPrincipledPreferences(bpy.types.PropertyGroup):
     base_color: StringProperty(
         name='Base Color',
-        default='diffuse diff albedo base col color',
+        default='diffuse diff albedo base col color basecolor',
         description='Naming Components for Base Color maps')
     sss_color: StringProperty(
         name='Subsurface Color',
@@ -822,11 +828,13 @@ def nw_check(context):
     space = context.space_data
     valid_trees = ["ShaderNodeTree", "CompositorNodeTree", "TextureNodeTree", "GeometryNodeTree"]
 
-    valid = False
-    if space.type == 'NODE_EDITOR' and space.node_tree is not None and space.tree_type in valid_trees:
-        valid = True
+    if (space.type == 'NODE_EDITOR'
+            and space.node_tree is not None
+            and space.node_tree.library is None
+            and space.tree_type in valid_trees):
+        return True
 
-    return valid
+    return False
 
 class NWBase:
     @classmethod
@@ -1390,6 +1398,8 @@ class NWPreviewNode(Operator, NWBase):
         # get all viewer sockets in a material tree
         for node in tree.nodes:
             if hasattr(node, "node_tree"):
+                if node.node_tree is None:
+                    continue
                 for socket in node.node_tree.outputs:
                     if is_viewer_socket(socket) and (socket not in sockets):
                         sockets.append(socket)
@@ -1902,7 +1912,7 @@ class NWMergeNodes(Operator, NWBase):
         items=(
             ('AUTO', 'Auto', 'Automatic Output Type Detection'),
             ('SHADER', 'Shader', 'Merge using ADD or MIX Shader'),
-            ('GEOMETRY', 'Geometry', 'Merge using Boolean or Join Geometry Node'),
+            ('GEOMETRY', 'Geometry', 'Merge using Mesh Boolean or Join Geometry Node'),
             ('MIX', 'Mix Node', 'Merge using Mix Nodes'),
             ('MATH', 'Math Node', 'Merge using Math Nodes'),
             ('ZCOMBINE', 'Z-Combine Node', 'Merge using Z-Combine Nodes'),
@@ -2156,7 +2166,7 @@ class NWMergeNodes(Operator, NWBase):
                         add_type = node_type + 'JoinGeometry'
                         add = self.merge_with_multi_input(nodes_list, merge_position, do_hide, loc_x, links, nodes, add_type,[0])
                     else:
-                        add_type = node_type + 'Boolean'
+                        add_type = node_type + 'MeshBoolean'
                         indices = [0,1] if mode == 'DIFFERENCE' else [1]
                         add = self.merge_with_multi_input(nodes_list, merge_position, do_hide, loc_x, links, nodes, add_type,indices)
                         add.operation = mode
@@ -2703,25 +2713,6 @@ class NWAddPrincipledSetup(Operator, NWBase, ImportHelper):
             self.report({'INFO'}, 'Select Principled BSDF')
             return {'CANCELLED'}
 
-        # Helper_functions
-        def split_into__components(fname):
-            # Split filename into components
-            # 'WallTexture_diff_2k.002.jpg' -> ['Wall', 'Texture', 'diff', 'k']
-            # Remove extension
-            fname = path.splitext(fname)[0]
-            # Remove digits
-            fname = ''.join(i for i in fname if not i.isdigit())
-            # Separate CamelCase by space
-            fname = re.sub(r"([a-z])([A-Z])", r"\g<1> \g<2>",fname)
-            # Replace common separators with SPACE
-            separators = ['_', '.', '-', '__', '--', '#']
-            for sep in separators:
-                fname = fname.replace(sep, ' ')
-
-            components = fname.split(' ')
-            components = [c.lower() for c in components]
-            return components
-
         # Filter textures names for texturetypes in filenames
         # [Socket Name, [abbreviations and keyword list], Filename placeholder]
         tags = context.preferences.addons[__name__].preferences.principled_tags
@@ -2743,19 +2734,7 @@ class NWAddPrincipledSetup(Operator, NWBase, ImportHelper):
         ['Ambient Occlusion', tags.ambient_occlusion.split(' '), None],
         ]
 
-        # Look through texture_types and set value as filename of first matched file
-        def match_files_to_socket_names():
-            for sname in socketnames:
-                for file in self.files:
-                    fname = file.name
-                    filenamecomponents = split_into__components(fname)
-                    matches = set(sname[1]).intersection(set(filenamecomponents))
-                    # TODO: ignore basename (if texture is named "fancy_metal_nor", it will be detected as metallic map, not normal map)
-                    if matches:
-                        sname[2] = fname
-                        break
-
-        match_files_to_socket_names()
+        match_files_to_socket_names(self.files, socketnames)
         # Remove socketnames without found files
         socketnames = [s for s in socketnames if s[2]
                        and path.exists(self.directory+s[2])]
@@ -2829,7 +2808,7 @@ class NWAddPrincipledSetup(Operator, NWBase, ImportHelper):
                 # NORMAL NODES
                 if sname[0] == 'Normal':
                     # Test if new texture node is normal or bump map
-                    fname_components = split_into__components(sname[2])
+                    fname_components = split_into_components(sname[2])
                     match_normal = set(normal_abbr).intersection(set(fname_components))
                     match_bump = set(bump_abbr).intersection(set(fname_components))
                     if match_normal:
@@ -2846,7 +2825,7 @@ class NWAddPrincipledSetup(Operator, NWBase, ImportHelper):
 
                 elif sname[0] == 'Roughness':
                     # Test if glossy or roughness map
-                    fname_components = split_into__components(sname[2])
+                    fname_components = split_into_components(sname[2])
                     match_rough = set(rough_abbr).intersection(set(fname_components))
                     match_gloss = set(gloss_abbr).intersection(set(fname_components))
 
